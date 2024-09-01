@@ -1,6 +1,7 @@
 import torch
 import torch.nn
 from torch.nn import functional as F
+from functools import partial
 
 batch_size = 32
 block_size = 8
@@ -89,10 +90,12 @@ class FeedForward(torch.nn.Module):
             torch.nn.Linear(num_embedding, 4 * num_embedding),
             torch.nn.ReLU(),
             torch.nn.Linear(4 * num_embedding, num_embedding),
+            torch.nn.LayerNorm(num_embedding)
         )
     
     def forward(self, x):
         return self.net(x)
+
 
 class Block(torch.nn.Module):
     def __init__(self, num_embedding, num_heads):
@@ -100,11 +103,14 @@ class Block(torch.nn.Module):
         head_size = num_embedding // num_heads
         self.sa = MultiHeadAttention(num_heads, head_size)
         self.ffwd = FeedForward(num_embedding)
+        self.ln1 = torch.nn.LayerNorm(num_embedding)
+        self.ln2 = torch.nn.LayerNorm(num_embedding)
 
     def forward(self, x):
-        x = x + self.sa(x)
-        x = x + self.ffwd(x)
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
         return x
+
 
 class LanguageModel(torch.nn.Module):
     def __init__(self):
