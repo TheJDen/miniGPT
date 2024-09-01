@@ -86,9 +86,9 @@ class FeedForward(torch.nn.Module):
     def __init__(self, num_embedding):
         super().__init__()
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(num_embedding, num_embedding),
+            torch.nn.Linear(num_embedding, 4 * num_embedding),
             torch.nn.ReLU(),
-            torch.nn.Linear(num_embedding, num_embedding),
+            torch.nn.Linear(4 * num_embedding, num_embedding),
         )
     
     def forward(self, x):
