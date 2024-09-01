@@ -4,7 +4,7 @@ from torch.nn import functional as F
 
 batch_size = 32
 block_size = 8
-max_iters = 10_000
+max_iters = 5_000
 eval_interval = 340
 learning_rate = 1e-3
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -80,6 +80,17 @@ class MultiHeadAttention(torch.nn.Module):
     def forward(self, x):
         return torch.cat([h(x) for h in self.heads], dim=-1)
 
+class FeedForward(torch.nn.Module):
+    def __init__(self, num_embedding):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(num_embedding, num_embedding),
+            torch.nn.ReLU(),
+        )
+    
+    def forward(self, x):
+        return self.net(x)
+
     
 
 class LanguageModel(torch.nn.Module):
@@ -88,6 +99,7 @@ class LanguageModel(torch.nn.Module):
         self.token_embedding_table = torch.nn.Embedding(vocab_size, num_embedding)
         self.position_embedding_table = torch.nn.Embedding(block_size, num_embedding)
         self.sa_heads = MultiHeadAttention(4, num_embedding // 4)
+        self.ffwd = FeedForward(num_embedding)
         self.lm_head = torch.nn.Linear(num_embedding, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -96,6 +108,7 @@ class LanguageModel(torch.nn.Module):
         position_embeddings = self.position_embedding_table(torch.arange(T, device=device))
         x = position_embeddings + token_embeddings
         x = self.sa_heads(x)
+        x = self.ffwd(x)
         logits = self.lm_head(x)
         if targets is None:
             loss = None
