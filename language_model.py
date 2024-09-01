@@ -76,9 +76,11 @@ class MultiHeadAttention(torch.nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = torch.nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = torch.nn.Linear(num_embedding, num_embedding)
 
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        return self.proj(out)
 
 class FeedForward(torch.nn.Module):
     def __init__(self, num_embedding):
@@ -86,20 +88,34 @@ class FeedForward(torch.nn.Module):
         self.net = torch.nn.Sequential(
             torch.nn.Linear(num_embedding, num_embedding),
             torch.nn.ReLU(),
+            torch.nn.Linear(num_embedding, num_embedding),
         )
     
     def forward(self, x):
         return self.net(x)
 
-    
+class Block(torch.nn.Module):
+    def __init__(self, num_embedding, num_heads):
+        super().__init__()
+        head_size = num_embedding // num_heads
+        self.sa = MultiHeadAttention(num_heads, head_size)
+        self.ffwd = FeedForward(num_embedding)
+
+    def forward(self, x):
+        x = x + self.sa(x)
+        x = x + self.ffwd(x)
+        return x
 
 class LanguageModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.token_embedding_table = torch.nn.Embedding(vocab_size, num_embedding)
         self.position_embedding_table = torch.nn.Embedding(block_size, num_embedding)
-        self.sa_heads = MultiHeadAttention(4, num_embedding // 4)
-        self.ffwd = FeedForward(num_embedding)
+        self.blocks = torch.nn.Sequential(
+            Block(num_embedding, num_heads=4),
+            Block(num_embedding, num_heads=4),
+            Block(num_embedding, num_heads=4),
+        )
         self.lm_head = torch.nn.Linear(num_embedding, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -107,8 +123,7 @@ class LanguageModel(torch.nn.Module):
         token_embeddings = self.token_embedding_table(idx)
         position_embeddings = self.position_embedding_table(torch.arange(T, device=device))
         x = position_embeddings + token_embeddings
-        x = self.sa_heads(x)
-        x = self.ffwd(x)
+        x = self.blocks(x)
         logits = self.lm_head(x)
         if targets is None:
             loss = None
@@ -129,7 +144,7 @@ class LanguageModel(torch.nn.Module):
         return idx
     
 model = LanguageModel()
-m = model.to(device)
+model = m = model.to(device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
