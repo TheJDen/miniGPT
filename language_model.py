@@ -11,7 +11,7 @@ device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 # mps has bug for large models right now
 eval_iters = 200
 num_embedding = 128
-num_layers = 4
+num_layers = 6
 num_heads = 6
 dropout = 0.2
 
