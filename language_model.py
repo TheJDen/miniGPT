@@ -1,16 +1,19 @@
 import torch
 import torch.nn
 from torch.nn import functional as F
-from functools import partial
 
-batch_size = 32
-block_size = 8
+batch_size = 64
+block_size = 256
 max_iters = 5_000
-eval_interval = 340
-learning_rate = 1e-3
+eval_interval = 500
+learning_rate = 3e-4
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+# mps has bug for large models right now
 eval_iters = 200
-num_embedding = 32
+num_embedding = 128
+num_layers = 4
+num_heads = 6
+dropout = 0.2
 
 torch.manual_seed(1337)
 
@@ -27,14 +30,14 @@ i_to_s = {i: ch for i, ch in enumerate(chars)}
 encode = lambda s: list(map(s_to_i.get, s))
 decode = lambda l: "".join(map(i_to_s.get, l))
 
-data = torch.tensor(encode(text), dtype=torch.long)
+data = torch.tensor(encode(text), dtype=torch.long, device=device)
 n = int(0.9 * len(data))
 train_data = data[:n]
 val_data = data[n:]
 
 def get_batch(split):
     data = train_data if split == "train" else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
+    ix = torch.randint(len(data) - block_size, (batch_size,), device=device)
     x = torch.stack([data[i: i + block_size] for i in ix])
     y = torch.stack([data[i + 1: i + block_size + 1] for i in ix])
     return x.to(device), y.to(device)
@@ -59,17 +62,20 @@ class Head(torch.nn.Module):
         self.key = torch.nn.Linear(num_embedding, head_size, bias=False)
         self.query = torch.nn.Linear(num_embedding, head_size, bias=False)
         self.value = torch.nn.Linear(num_embedding, head_size, bias=False)
-        self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
-    
+        self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size, device=device)))
+        self.dropout = torch.nn.Dropout(dropout)
+        
     def forward(self, x):
         B, T, C = x.shape
         k = self.key(x)
         q = self.query(x)
 
-        wei = q @ k.transpose(-2, -1) * C ** 0.5
+        wei = q @ k.transpose(-2, -1) * (k.shape[-1] ** 0.5)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
         wei = F.softmax(wei, dim=-1)
-        
+
+        wei = self.dropout(wei)
+
         v = self.value(x)
         return wei @ v
 
@@ -77,11 +83,12 @@ class MultiHeadAttention(torch.nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = torch.nn.ModuleList([Head(head_size) for _ in range(num_heads)])
-        self.proj = torch.nn.Linear(num_embedding, num_embedding)
+        self.proj = torch.nn.Linear(head_size * num_heads, num_embedding)
+        self.dropout = torch.nn.Dropout(dropout)
 
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
-        return self.proj(out)
+        return self.dropout(self.proj(out))
 
 class FeedForward(torch.nn.Module):
     def __init__(self, num_embedding):
@@ -90,12 +97,11 @@ class FeedForward(torch.nn.Module):
             torch.nn.Linear(num_embedding, 4 * num_embedding),
             torch.nn.ReLU(),
             torch.nn.Linear(4 * num_embedding, num_embedding),
-            torch.nn.LayerNorm(num_embedding)
+            torch.nn.Dropout(dropout)
         )
     
     def forward(self, x):
         return self.net(x)
-
 
 class Block(torch.nn.Module):
     def __init__(self, num_embedding, num_heads):
@@ -117,11 +123,8 @@ class LanguageModel(torch.nn.Module):
         super().__init__()
         self.token_embedding_table = torch.nn.Embedding(vocab_size, num_embedding)
         self.position_embedding_table = torch.nn.Embedding(block_size, num_embedding)
-        self.blocks = torch.nn.Sequential(
-            Block(num_embedding, num_heads=4),
-            Block(num_embedding, num_heads=4),
-            Block(num_embedding, num_heads=4),
-        )
+        self.blocks = torch.nn.Sequential(*(Block(num_embedding, num_heads=num_heads) for _ in range(num_layers)))
+        self.ln_f = torch.nn.LayerNorm(num_embedding)
         self.lm_head = torch.nn.Linear(num_embedding, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -130,6 +133,7 @@ class LanguageModel(torch.nn.Module):
         position_embeddings = self.position_embedding_table(torch.arange(T, device=device))
         x = position_embeddings + token_embeddings
         x = self.blocks(x)
+        x = self.ln_f(x)
         logits = self.lm_head(x)
         if targets is None:
             loss = None
@@ -152,19 +156,33 @@ class LanguageModel(torch.nn.Module):
 model = LanguageModel()
 model = m = model.to(device)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-for i in range(max_iters):
-    if i % eval_interval == 0:
-        losses = estimate_loss()
-        print(f'step {i}: train loss {losses["train"]:.4f}, val loss {losses["val"]:.4f}')
+import os
+model_path = "weights.pt"
+try:
+    if os.path.exists(model_path):
+        with open(model_path, 'rb') as f:
+            model.load_state_dict(torch.load(f))
+    for i in range(max_iters):
+        if i % eval_interval == 0:
+            losses = estimate_loss()
+            print(f'step {i}: train loss {losses["train"]:.4f}, val loss {losses["val"]:.4f}')
 
-    xb, yb = get_batch("train")
-    logits, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
+        xb, yb = get_batch("train")
+        logits, loss = model(xb, yb)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+    losses = estimate_loss()
+    print(f'step {max_iters - 1}: train loss {losses["train"]:.4f}, val loss {losses["val"]:.4f}')
+except KeyboardInterrupt:
+    with open(model_path, 'wb') as f:
+        torch.save(model.state_dict(), f)
 
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+
+with open(model_path, 'wb') as f:
+    torch.save(model.state_dict(), f)
 

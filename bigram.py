@@ -81,7 +81,7 @@ class BigramModel(torch.nn.Module):
 model = BigramModel(vocab_size)
 m = model.to(device)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 for i in range(max_iters):
     if i % eval_interval == 0:
